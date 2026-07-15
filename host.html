@@ -1,0 +1,503 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2次関数マルチバトル - ホスト管理画面【完全版】</title>
+    
+    <!-- KaTeXの高速・美麗な数式レンダリング -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
+
+    <!-- Firebase SDKの読み込み (v10) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, setDoc, updateDoc, collection, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCIWQzF_drCJqu0p2pPVYfdA_EVIJSDH2k",
+            authDomain: "yamatest-e394f.firebaseapp.com",
+            projectId: "yamatest-e394f",
+            storageBucket: "yamatest-e394f.firebasestorage.app",
+            messagingSenderId: "725899974814",
+            appId: "1:725899974814:web:7bb050e79938a7f140838f",
+            measurementId: "G-REJEYVRBEH"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // アプリケーション状態管理
+        let currentRoomId = null;
+        let unsubscribePlayers = null;
+        let unsubscribeBattle = null;
+        let gameRule = "time";
+        let timeLimit = 180;
+        let initialStock = 3;
+        let timerInterval = null;
+        let timeLeft = 0;
+        let playersData = [];
+
+        // フィッシャー・イェーツ シャッフル
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array;
+        }
+
+        // 問題データの自動生成 (計35問)
+        function generateSharedQuestions() {
+            const list = [];
+            const aPool = shuffleArray([1, 2, 3, -1, -2, -3, 1, 2, -1, -2, 4, -4]);
+            const pPool = shuffleArray([1, 2, 3, 4, 5, -1, -2, -3, -4, -5, 6, -6]);
+            const qPool = shuffleArray([2, 3, 4, 5, 6, -2, -3, -4, -5, -6, 7, -7]);
+
+            for (let i = 0; i < 10; i++) {
+                list.push({
+                    type: 'vertex',
+                    a: aPool[i % aPool.length], p: pPool[i % pPool.length], q: qPool[i % qPool.length],
+                    answers: [pPool[i % pPool.length].toString(), qPool[i % qPool.length].toString()]
+                });
+            }
+            const pPoolAxis = shuffleArray([2, 3, 5, 7, 8, -2, -4, -6, -8, -9, 1, -1]);
+            for (let i = 0; i < 10; i++) {
+                list.push({
+                    type: 'axis',
+                    a: aPool[i % aPool.length], p: pPoolAxis[i % pPoolAxis.length], q: qPool[i % qPool.length],
+                    answers: [pPoolAxis[i % pPoolAxis.length].toString()]
+                });
+            }
+            const aPoolExt = shuffleArray([1, 2, 5, -1, -2, -5, 3, -3, 4, -4]);
+            for (let i = 0; i < 10; i++) {
+                let a = aPoolExt[i % aPoolExt.length];
+                let q = qPool[i % qPool.length];
+                list.push({
+                    type: 'extremum',
+                    a: a, p: pPool[i % pPool.length], q: q,
+                    answers: [a > 0 ? "min" : "max", q.toString()]
+                });
+            }
+            const aPoolConvex = shuffleArray([2, -2, 3, -1, 1, -3, 5, -5]);
+            for (let i = 0; i < 5; i++) {
+                let a = aPoolConvex[i % aPoolConvex.length];
+                list.push({
+                    type: 'convex',
+                    a: a, p: pPool[i % pPool.length], q: qPool[i % qPool.length],
+                    answers: [a > 0 ? "down" : "up"]
+                });
+            }
+            return shuffleArray(list);
+        }
+
+        // 部屋開設
+        window.createRoom = async function() {
+            const btn = document.getElementById("create-room-btn");
+            btn.disabled = true;
+            btn.innerText = "部屋を開設中...";
+
+            const roomId = Math.floor(1000 + Math.random() * 9000).toString();
+            currentRoomId = roomId;
+            gameRule = document.getElementById("rule-select").value;
+            timeLimit = parseInt(document.getElementById("time-select").value, 10);
+            initialStock = parseInt(document.getElementById("stock-select").value, 10);
+
+            const questions = generateSharedQuestions();
+
+            try {
+                await setDoc(doc(db, "rooms", roomId), {
+                    roomId: roomId,
+                    status: "waiting",
+                    gameRule: gameRule,
+                    timeLimit: timeLimit,
+                    initialStock: initialStock,
+                    questions: questions,
+                    createdAt: serverTimestamp()
+                });
+
+                document.getElementById("setup-area").style.display = "none";
+                document.getElementById("lobby-area").style.display = "block";
+                document.getElementById("display-room-id").innerText = roomId;
+
+                startListeningPlayers(roomId);
+
+            } catch (e) {
+                console.error(e);
+                alert("通信エラーが発生しました。詳細: " + e.message);
+                btn.disabled = false;
+                btn.innerText = "対戦部屋を開設する";
+            }
+        };
+
+        // 待合室での生徒監視
+        function startListeningPlayers(roomId) {
+            const playersListEl = document.getElementById("players-list");
+            const countEl = document.getElementById("player-count");
+
+            unsubscribePlayers = onSnapshot(collection(db, "rooms", roomId, "players"), (snapshot) => {
+                playersListEl.innerHTML = "";
+                countEl.innerText = snapshot.size;
+
+                if (snapshot.empty) {
+                    playersListEl.innerHTML = `<div class="no-players">生徒の入室を待っています...<br><span style="font-size:1rem; font-weight:normal; color:#adb5bd;">手元の端末でルームIDを入力してください</span></div>`;
+                    document.getElementById("start-game-btn").disabled = true;
+                    return;
+                }
+
+                document.getElementById("start-game-btn").disabled = false;
+
+                snapshot.forEach((docSnap) => {
+                    const player = docSnap.data();
+                    const card = document.createElement("div");
+                    card.className = "player-card";
+                    card.innerText = player.nickname || "匿名ユーザー";
+                    playersListEl.appendChild(card);
+                });
+            });
+        }
+
+        // ゲーム一斉スタート
+        window.startGame = async function() {
+            if (!currentRoomId) return;
+            const startBtn = document.getElementById("start-game-btn");
+            startBtn.disabled = true;
+            startBtn.innerText = "スタート信号を送信中...";
+
+            try {
+                // 【バグ修正完了】二重になっていた doc() 呼び出しを一本化
+                await updateDoc(doc(db, "rooms", currentRoomId), {
+                    status: "playing",
+                    startedAt: serverTimestamp()
+                });
+                
+                if (unsubscribePlayers) unsubscribePlayers();
+                
+                // バトル画面へのUI切り替え
+                document.getElementById("lobby-area").style.display = "none";
+                document.getElementById("battle-area").style.display = "block";
+                document.getElementById("battle-room-id").innerText = currentRoomId;
+
+                // ライブ同期とタイマースタート
+                startBattleTracking(currentRoomId);
+                if (gameRule === 'time') startHostTimer();
+                else document.getElementById("host-timer-display").innerText = "SURVIVAL MODE";
+
+            } catch (e) {
+                console.error("ゲーム開始エラー:", e);
+                // セキュリティルール違反か構文エラーかをアラートで明示
+                alert("ゲーム開始に失敗しました。\n原因: " + e.message);
+                startBtn.disabled = false;
+                startBtn.innerText = "全員一斉にスタート！";
+            }
+        };
+
+        // 制限時間タイマー
+        function startHostTimer() {
+            timeLeft = timeLimit;
+            updateTimerDisplay();
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                updateTimerDisplay();
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    triggerTimeUpSequence();
+                }
+            }, 1000);
+        }
+
+        function updateTimerDisplay() {
+            let m = Math.floor(timeLeft / 60);
+            let s = timeLeft % 60;
+            document.getElementById("host-timer-display").innerText = `Time: ${m}:${s < 10 ? '0' : ''}${s}`;
+        }
+
+        // タイムアップ集計中エフェクト（3秒バッファ）
+        async function triggerTimeUpSequence() {
+            try {
+                await updateDoc(doc(db, "rooms", currentRoomId), { status: "result" });
+            } catch(e) { console.error(e); }
+
+            document.getElementById("leaderboard-wrapper").innerHTML = `
+                <div class="aggregating-box">
+                    ⏱ タイムアップ！<br>
+                    <span>生徒の解答ログを最終集計しています...</span>
+                </div>
+            `;
+            setTimeout(() => { showFinalResult(); }, 3000);
+        }
+
+        // リアルタイム順位同期（ライブリーダーボード処理）
+        function startBattleTracking(roomId) {
+            const wrapper = document.getElementById("leaderboard-list");
+
+            unsubscribeBattle = onSnapshot(collection(db, "rooms", roomId, "players"), (snapshot) => {
+                playersData = [];
+                snapshot.forEach((d) => { playersData.push(d.data()); });
+
+                // クラス内マルチ用ソートアルゴリズム（厳密タイブレーク）
+                playersData.sort((a, b) => {
+                    if (gameRule === 'stock') {
+                        if (a.stock !== b.stock) return b.stock - a.stock; // ライフ順
+                        if (a.currentQIdx !== b.currentQIdx) return b.currentQIdx - a.currentQIdx; // 進んだ問題数順
+                        return a.elapsedTime - b.elapsedTime; // タイムが短い順
+                    } else {
+                        if (a.correct !== b.correct) return b.correct - a.correct; // 正解数順
+                        if (a.elapsedTime !== b.elapsedTime) return a.elapsedTime - b.elapsedTime; // タイム順
+                        return a.miss - b.miss; // ミスが少ない順
+                    }
+                });
+
+                // 画面描画の更新
+                wrapper.innerHTML = "";
+                let allFinished = true;
+
+                playersData.forEach((p, idx) => {
+                    if (!p.isFinished) allFinished = false;
+
+                    const row = document.createElement("div");
+                    row.className = `leaderboard-row ${p.stock <= 0 && gameRule === 'stock' ? 'out-p' : ''}`;
+                    
+                    let statText = gameRule === 'stock' 
+                        ? (p.stock > 0 ? "★".repeat(p.stock) : "✕ 脱落") 
+                        : `${p.correct} 問正解`;
+                    
+                    let pTime = (p.elapsedTime / 1000).toFixed(1);
+
+                    row.innerHTML = `
+                        <div style="display:flex; align-items:center; gap:15px;">
+                            <div class="rank-badge">${idx + 1}</div>
+                            <div class="p-name">${p.nickname}</div>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:25px;">
+                            <div class="p-progress">Progress: ${p.currentQIdx}/35</div>
+                            <div class="p-time">${pTime}秒</div>
+                            <div class="p-score">${statText}</div>
+                        </div>
+                    `;
+                    wrapper.appendChild(row);
+                });
+
+                // 全員が制限時間前に解き終わるかサバイバルで全滅した場合
+                if (playersData.length > 0 && allFinished) {
+                    clearInterval(timerInterval);
+                    if (unsubscribeBattle) unsubscribeBattle();
+                    showFinalResult();
+                }
+            });
+        }
+
+        // 最終リザルト・豪華表彰台の描画
+        function showFinalResult() {
+            if (unsubscribeBattle) unsubscribeBattle();
+            
+            document.getElementById("battle-area").style.display = "none";
+            document.getElementById("result-area").style.display = "block";
+
+            const podiumWrapper = document.getElementById("podium-container");
+            const subListWrapper = document.getElementById("sub-leaderboard-list");
+
+            podiumWrapper.innerHTML = "";
+            subListWrapper.innerHTML = "";
+
+            // 1位〜3位の表彰台マッピングデータ
+            const podiumMap = [
+                { rank: 2, data: playersData[1], class: "podium-2nd" },
+                { rank: 1, data: playersData[0], class: "podium-1st" },
+                { rank: 3, data: playersData[2], class: "podium-3rd" }
+            ];
+
+            podiumMap.forEach((p) => {
+                if (!p.data) return;
+                const box = document.createElement("div");
+                box.className = `podium-box ${p.class}`;
+                
+                let valText = gameRule === 'stock' ? `残りライフ: ${p.data.stock}` : `${p.data.correct}問正解`;
+                let timeText = `${(p.data.elapsedTime / 1000).toFixed(1)}秒`;
+
+                box.innerHTML = `
+                    <div class="podium-rank">${p.rank}</div>
+                    <div class="podium-name">${p.data.nickname}</div>
+                    <div class="podium-score">${valText}<br><span style="font-size:0.9rem; font-weight:normal; opacity:0.8;">${timeText}</span></div>
+                    <div class="podium-bar"></div>
+                `;
+                podiumWrapper.appendChild(box);
+            });
+
+            // 4位以下のリスト表示
+            for (let i = 3; i < playersData.length; i++) {
+                const p = playersData[i];
+                const row = document.createElement("div");
+                row.className = "leaderboard-row";
+                let valText = gameRule === 'stock' ? `ライフ: ${p.stock}` : `${p.correct}問正解`;
+                row.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:15px;">
+                        <div class="rank-badge" style="background:#6c757d;">${i + 1}</div>
+                        <div class="p-name">${p.nickname}</div>
+                    </div>
+                    <div style="font-weight:700; color:var(--accent);">${valText} (${(p.elapsedTime/1000).toFixed(1)}秒)</div>
+                `;
+                subListWrapper.appendChild(row);
+            }
+        }
+
+        window.resetApp = function() {
+            if (confirm("ゲームを完全にリセットして初期設定画面に戻りますか？")) {
+                location.reload();
+            }
+        };
+
+        window.toggleRuleOptions = function() {
+            const rule = document.getElementById("rule-select").value;
+            document.getElementById("time-option-group").style.display = rule === 'time' ? 'block' : 'none';
+            document.getElementById("stock-option-group").style.display = rule === 'stock' ? 'block' : 'none';
+        };
+    </script>
+
+    <style>
+        :root {
+            --bg-color: #f1f3f5;
+            --card-bg: #ffffff;
+            --text-main: #212529;
+            --border: #dee2e6;
+            --accent: #495057;
+            --p1-color: #0d6efd;
+            --success: #198754;
+            --error: #dc3545;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+            box-sizing: border-box;
+            }
+
+        .app-container { width: 100%; max-width: 1000px; background: var(--card-bg); border-radius: 20px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); border: 1px solid var(--border); box-sizing: border-box; text-align: center; }
+        h1 { font-size: 2.3rem; color: var(--accent); margin-bottom: 25px; font-weight: 800; }
+        .config-panel { max-width: 500px; margin: 0 auto; text-align: left; background: #f8f9fa; padding: 30px; border-radius: 12px; border: 1px solid var(--border); }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-weight: 600; margin-bottom: 8px; color: var(--accent); }
+        .form-select { width: 100%; padding: 12px; font-size: 1.1rem; border: 2px solid var(--border); border-radius: 8px; outline: none; background: #fff; cursor: pointer; }
+        .btn-main { width: 100%; padding: 16px; font-size: 1.2rem; border: none; border-radius: 8px; cursor: pointer; font-weight: 700; box-sizing: border-box; margin-top: 10px; transition: opacity 0.2s; }
+        .btn-create { background: var(--accent); color: #fff; }
+        .btn-start { background: var(--success); color: #fff; }
+        .btn-reset { background: #6c757d; color: #fff; max-width: 250px; margin: 30px auto 0 auto; }
+        .btn-main:disabled { background: var(--border); color: #adb5bd; cursor: not-allowed; }
+
+        /* ロビー用 */
+        .room-id-box { font-size: 6.5rem; font-weight: 800; color: var(--p1-color); letter-spacing: 5px; margin: 10px 0; font-family: monospace; text-shadow: 0 4px 10px rgba(13,110,253,0.15); }
+        .players-section-title { font-size: 1.4rem; font-weight: 700; color: var(--accent); text-align: left; margin-bottom: 15px; border-left: 5px solid var(--accent); padding-left: 12px; display: flex; justify-content: space-between; align-items: center; }
+        .counter-badge { background: #e9ecef; padding: 4px 14px; border-radius: 20px; font-size: 1.1rem; }
+        .players-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; min-height: 150px; max-height: 350px; overflow-y: auto; background: #f8f9fa; border: 2px dashed var(--border); padding: 20px; border-radius: 12px; margin-bottom: 30px; }
+        .player-card { background: white; border: 1px solid var(--border); padding: 12px 6px; border-radius: 8px; font-weight: 700; font-size: 1.05rem; box-shadow: 0 2px 5px rgba(0,0,0,0.02); animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
+        .no-players { grid-column: 1 / -1; align-self: center; font-size: 1.2rem; color: #adb5bd; font-weight: 600; }
+
+        /* リアルタイムバトル・順位表用 */
+        .battle-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 2px solid var(--border); }
+        .host-timer { font-size: 2.2rem; font-weight: 800; color: var(--text-main); font-family: monospace; }
+        .leaderboard-container { background: #f8f9fa; border-radius: 14px; border: 1px solid var(--border); padding: 20px; max-height: 500px; overflow-y: auto; }
+        .leaderboard-row { display: flex; justify-content: space-between; align-items: center; background: white; border: 1px solid var(--border); padding: 14px 20px; border-radius: 10px; margin-bottom: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.02); transition: transform 0.2s; }
+        .leaderboard-row.out-p { background: #f1f3f5; opacity: 0.6; border-left: 6px solid var(--error); }
+        .rank-badge { background: var(--p1-color); color: white; width: 32px; height: 32px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-weight: 700; font-size: 1rem; }
+        .p-name { font-weight: 700; font-size: 1.2rem; }
+        .p-score { font-weight: 800; color: var(--p1-color); font-size: 1.15rem; min-width: 120px; text-align: right; }
+        .p-progress { color: #6c757d; font-size: 0.95rem; font-family: monospace; }
+        .p-time { color: #6c757d; font-size: 0.95rem; font-family: monospace; }
+        .aggregating-box { padding: 40px; font-weight: 700; font-size: 1.8rem; color: var(--accent); line-height: 1.6; }
+        .aggregating-box span { font-size: 1.1rem; color: #6c757d; font-weight: normal; }
+
+        /* 表彰台用 */
+        .podium-section { display: flex; justify-content: center; align-items: flex-end; gap: 20px; margin: 40px auto 50px auto; height: 320px; max-width: 700px; }
+        .podium-box { display: flex; flex-direction: column; align-items: center; width: 30%; }
+        .podium-bar { width: 100%; border-radius: 10px 10px 0 0; box-shadow: 0 4px 15px rgba(0,0,0,0.05); transition: height 1s ease-out; }
+        .podium-rank { font-size: 2.8rem; font-weight: 900; margin-bottom: 5px; }
+        .podium-name { font-weight: 700; font-size: 1.3rem; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; }
+        .podium-score { font-weight: 800; font-size: 1.05rem; margin-bottom: 12px; }
+        
+        .podium-1st { color: #ffbc00; }
+        .podium-1st .podium-bar { height: 180px; background: linear-gradient(180deg, #ffe066, #ffbc00); }
+        .podium-2nd { color: #b2bec3; }
+        .podium-2nd .podium-bar { height: 120px; background: linear-gradient(180deg, #dfe6e9, #b2bec3); }
+        .podium-3rd { color: #cb7a4d; }
+        .podium-3rd .podium-bar { height: 80px; background: linear-gradient(180deg, #e4a77d, #cb7a4d); }
+
+        @keyframes popIn { 0% { transform: scale(0.8); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+    </style>
+</head>
+<body>
+
+<div class="app-container">
+    <!-- フェーズ1: 部屋設定画面 -->
+    <div id="setup-area">
+        <h1>2次関数オンライン</h1>
+        <div class="config-panel">
+            <div class="form-group">
+                <label for="rule-select">対戦ルール</label>
+                <select id="rule-select" class="form-select" onchange="toggleRuleOptions()">
+                    <option value="time">タイムアタック</option>
+                    <option value="stock">サバイバル</option>
+                </select>
+            </div>
+            <div class="form-group" id="time-option-group">
+                <label for="time-select">ゲーム制限時間</label>
+                <select id="time-select" class="form-select">
+                    <option value="180">3分間</option>
+                    <option value="300">5分間</option>
+                </select>
+            </div>
+            <div class="form-group" id="stock-option-group" style="display:none;">
+                <label for="stock-select">生徒の初期ライフ（ストック）数</label>
+                <select id="stock-select" class="form-select">
+                    <option value="1">1つ (ミス即終了・上級者モード)</option>
+                    <option value="2">2つ</option>
+                    <option value="3" selected>3つ (標準サバイバル)</option>
+                </select>
+            </div>
+            <button id="create-room-btn" class="btn-main btn-create" onclick="createRoom()">ルームを作る</button>
+        </div>
+    </div>
+
+    <!-- フェーズ2: マッチング待合室（ロビー） -->
+    <div id="lobby-area" style="display:none;">
+        <div style="font-size:1.4rem; color:#6c757d; font-weight:500;">端末でルームIDを入力してください</div>
+        <div class="room-id-box" id="display-room-id">----</div>
+        <div class="players-section-title">
+            <span>入室中の生徒一覧</span>
+            <span class="counter-badge"><span id="player-count">0</span> 人</span>
+        </div>
+        <div class="players-grid" id="players-list"></div>
+        <div style="max-width: 400px; margin: 0 auto;"><button id="start-game-btn" class="btn-main btn-start" onclick="startGame()" disabled>全員一斉にスタート！</button></div>
+    </div>
+
+    <!-- フェーズ3: リアルタイムバトル投影画面 -->
+    <div id="battle-area" style="display:none;">
+        <div class="battle-header">
+            <div style="text-align:left;"><span style="color:#6c757d; font-size:1rem; font-weight:bold;">ROOM ID: </span><span id="battle-room-id" style="font-size:1.5rem; font-weight:800; font-family:monospace; color:var(--p1-color);">0000</span></div>
+            <div class="host-timer" id="host-timer-display">Time: --:--</div>
+        </div>
+        <div class="players-section-title">クラスリアルタイム順位表 (Live Leaderboard)</div>
+        <div class="leaderboard-container" id="leaderboard-wrapper">
+            <div id="leaderboard-list"><!-- 動的にソートされた行がリアルタイムに並び変わります --></div>
+        </div>
+    </div>
+
+    <!-- フェーズ4: 最終結果・表彰台リザルト投影画面 -->
+    <div id="result-area" style="display:none;">
+        <h1 style="font-size:3rem; margin-bottom:10px;">👑 FINAL RESULT 👑</h1>
+        <div class="podium-section" id="podium-container"></div>
+        <div class="players-section-title">全解答者の最終順位</div>
+        <div class="leaderboard-container" id="sub-leaderboard-list"></div>
+        <button class="btn-main btn-reset" onclick="resetApp()">新しい対戦部屋を作る</button>
+    </div>
+</div>
+
+</body>
+</html>
