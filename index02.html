@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2次関数オンライン - 平方完成解答画面</title>
+    
+    <!-- KaTeXの高速・美麗な数式レンダリング -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
+
+    <!-- Firebase SDKの読み込み (v10) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCIWQzF_drCJqu0p2pPVYfdA_EVIJSDH2k",
+            authDomain: "yamatest-e394f.firebaseapp.com",
+            projectId: "yamatest-e394f",
+            storageBucket: "yamatest-e394f.firebasestorage.app",
+            messagingSenderId: "725899974814",
+            appId: "1:725899974814:web:7bb050e79938a7f140838f",
+            measurementId: "G-REJEYVRBEH"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // グローバルアプリケーション状態
+        let roomId = null;
+        let playerId = null;
+        let nickname = "";
+        let questions = [];
+        let qIdx = 0;
+        let activeInputIdx = 0;
+        let rule = "time";
+        let initialStock = 3;
+        let currentStock = 3;
+        let correctCount = 0;
+        let missCount = 0;
+        let totalElapsedTime = 0;
+        
+        let questionStartTime = 0;
+        let unsubscribeRoom = null;
+        let isAggregating = false;
+
+        const stepDescriptions = [
+            "x の 係数 の 「半分」 を括弧内に埋めよう",
+            "半分にした数の 「2乗を引く」 部分を埋めよう",
+            "「半分」 と 「2乗を引く」 の両方を同時に埋めよう",
+            "定数項を計算して、最後の数字をまとめよう",
+            "これまでのステップをすべて使って、一気に完成させよう！"
+        ];
+
+        // 部屋への入室処理
+        window.joinRoom = async function() {
+            const roomInput = document.getElementById("room-id-input").value.trim();
+            const nameInput = document.getElementById("nickname-input").value.trim();
+            const btn = document.getElementById("join-btn");
+
+            if (!roomInput || !nameInput) {
+                alert("ルームIDとニックネームを入力してください。");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "入室処理中...";
+
+            try {
+                const roomRef = doc(db, "rooms", roomInput);
+                const roomSnap = await getDoc(roomRef);
+
+                if (!roomSnap.exists()) {
+                    alert("指定されたルームIDが見つかりません。先生の画面を確認してください。");
+                    btn.disabled = false;
+                    btn.innerText = "対戦部屋に入る";
+                    return;
+                }
+
+                const roomData = roomSnap.data();
+                if (roomData.status !== "waiting") {
+                    alert("この部屋の対戦は既に開始されているか、終了しています。");
+                    btn.disabled = false;
+                    btn.innerText = "対戦部屋に入る";
+                    return;
+                }
+
+                // 状態の保持と問題データのローカルコピー
+                roomId = roomInput;
+                nickname = nameInput;
+                questions = roomData.questions;
+                rule = roomData.gameRule;
+                initialStock = roomData.initialStock;
+                currentStock = roomData.initialStock;
+                playerId = Math.random().toString(36).substring(2, 10); // 簡易固有ID生成
+
+                // Firestoreのplayersサブコレクションに自身を登録
+                await setDoc(doc(db, "rooms", roomId, "players", playerId), {
+                    playerId: playerId,
+                    nickname: nickname,
+                    correct: 0,
+                    miss: 0,
+                    stock: currentStock,
+                    elapsedTime: 0,
+                    currentQIdx: 0,
+                    isFinished: false
+                });
+
+                // UIの切り替え（待機画面へ）
+                document.getElementById("screen-login").classList.remove("active");
+                document.getElementById("screen-wait").classList.add("active");
+
+                // ホストからのスタート合図（status -> playing）をリアルタイム監視
+                listenRoomStatus();
+
+            } catch (e) {
+                console.error("入室エラー: ", e);
+                alert("接続に失敗しました。ネットワーク状況を確認してください。");
+                btn.disabled = false;
+                btn.innerText = "対戦部屋に入る";
+            }
+        };
+
+        // 部屋のステータス変化を監視
+        function listenRoomStatus() {
+            unsubscribeRoom = onSnapshot(doc(db, "rooms", roomId), (docSnap) => {
+                if (!docSnap.exists()) return;
+                const data = docSnap.data();
+
+                if (data.status === "playing") {
+                    if (unsubscribeRoom) unsubscribeRoom();
+                    startCountdown();
+                }
+            });
+        }
+
+        // スタート前のカウントダウン演出
+        function startCountdown() {
+            document.getElementById("screen-wait").classList.remove("active");
+            document.getElementById("screen-countdown").classList.add("active");
+            const cdEl = document.getElementById("countdown-number");
+
+            let count = 3;
+            cdEl.innerText = count;
+            
+            const interval = setInterval(() => {
+                count--;
+                if (count === 0) {
+                    clearInterval(interval);
+                    document.getElementById("screen-countdown").classList.remove("active");
+                    document.getElementById("screen-game").classList.add("active");
+                    initGamePlay();
+                } else {
+                    cdEl.innerText = count;
+                }
+            }, 1000);
+        }
+
+        // ゲームプレイ画面の初期化
+        function initGamePlay() {
+            qIdx = 0;
+            correctCount = 0;
+            missCount = 0;
+            totalElapsedTime = 0;
+            isAggregating = false;
+
+            if (rule === 'stock') {
+                document.getElementById("status-label").innerText = "残りライフ";
+                document.getElementById("status-display").innerText = "★".repeat(initialStock);
+            } else {
+                document.getElementById("status-label").innerText = "正解数";
+                document.getElementById("status-display").innerText = "0 問";
+            }
+
+            loadQuestion();
+        }
+
+        // 平方完成スモールステップ問題の読み込みとレンダリング
+        function loadQuestion() {
+            if (isAggregating) return;
+            const q = questions[qIdx];
+            const area = document.getElementById("question-area");
+            area.innerHTML = '';
+
+            // 上限を50問として表示
+            document.getElementById("game-info").innerText = `${qIdx + 1} / 50問目`;
+            document.getElementById("step-desc").innerText = `目標: ${stepDescriptions[q.step - 1]}`;
+
+            let signB = q.b >= 0 ? "+" : "-";
+            let absB = Math.abs(q.b);
+            let signC = q.c >= 0 ? "+" : "-";
+            let absC = Math.abs(q.c);
+
+            let leftTex = `x^2 ${signB} ${absB}x`;
+            if (q.step >= 4) leftTex += ` ${signC} ${absC}`;
+
+            let rightTemplate = '';
+            if (q.step === 1) rightTemplate = `(x + [IN_0])^2 - ${q.h2}`;
+            else if (q.step === 2) rightTemplate = `(x + ${q.h >= 0 ? q.h : '(' + q.h + ')'})^2 - [IN_0]`;
+            else if (q.step === 3) rightTemplate = `(x + [IN_0])^2 - [IN_1]`;
+            else if (q.step === 4) rightTemplate = `(x + ${q.h >= 0 ? q.h : '(' + q.h + ')'})^2 [IN_0]`;
+            else if (q.step === 5) rightTemplate = `(x + [IN_0])^2 [IN_1]`;
+
+            let currentQuestionTex = `${leftTex} = ${rightTemplate}`;
+            window.currentQuestionTexLog = currentQuestionTex; // ログ用保持
+
+            let parts = currentQuestionTex.split(/(\[IN_\d+\])/);
+            parts.forEach(part => {
+                if (part.match(/\[IN_(\d+)\]/)) {
+                    let inputIdx = RegExp.$1;
+                    let input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'fill-input';
+                    input.readOnly = true;
+                    input.setAttribute('data-ans', q.answers[inputIdx]);
+                    input.setAttribute('data-idx', inputIdx);
+                    input.id = `in-${inputIdx}`;
+                    input.addEventListener('click', () => setActiveInput(parseInt(inputIdx, 10)));
+                    area.appendChild(input);
+                } else {
+                    if (part.length > 0) {
+                        let span = document.createElement('span');
+                        katex.render(part, span, { displayMode: false });
+                        area.appendChild(span);
+                    }
+                }
+            });
+
+            setActiveInput(0);
+
+            document.getElementById("result-text").innerText = '';
+            document.getElementById("ans-btn").disabled = false;
+            document.getElementById("next-btn").disabled = true;
+
+            questionStartTime = performance.now();
+        }
+
+        function setActiveInput(idx) {
+            if (isAggregating) return;
+            const targetEl = document.getElementById(`in-${idx}`);
+            if (!targetEl) return;
+            
+            activeInputIdx = idx;
+            document.querySelectorAll('.fill-input').forEach(el => {
+                let curIdx = parseInt(el.getAttribute('data-idx'), 10);
+                el.classList.toggle('active-focus', curIdx === idx);
+            });
+        }
+
+        // 解答チェックと動的送信処理
+        window.checkAnswer = async function() {
+            if (isAggregating) return;
+            
+            const lapTime = performance.now() - questionStartTime;
+            totalElapsedTime += lapTime;
+
+            const q = questions[qIdx];
+            const inputs = document.querySelectorAll('.fill-input');
+            let isAllCorrect = true;
+
+            let rawUserInputs = [];
+            let correctAnswers = [];
+
+            inputs.forEach(input => {
+                let userStr = input.value.trim();
+                let userVal = parseInt(userStr, 10);
+                let correctVal = parseInt(input.getAttribute('data-ans'), 10);
+
+                rawUserInputs.push(userStr);
+                correctAnswers.push(input.getAttribute('data-ans'));
+
+                if (!isNaN(userVal) && userVal === correctVal) {
+                    input.style.borderColor = 'var(--success)';
+                    input.style.backgroundColor = '#e8f5e9';
+                } else {
+                    input.style.borderColor = 'var(--error)';
+                    input.style.backgroundColor = '#ffebee';
+                    isAllCorrect = false;
+                }
+            });
+
+            if (isAllCorrect) {
+                correctCount++;
+                document.getElementById("result-text").innerHTML = '<span class="text-success">〇 正解！</span>';
+            } else {
+                missCount++;
+                let correctStrings = [];
+                inputs.forEach(input => {
+                    let val = parseInt(input.getAttribute('data-ans'), 10);
+                    let idx = input.getAttribute('data-idx');
+                    correctStrings.push(val > 0 && idx > 0 ? `+${val}` : val);
+                });
+                document.getElementById("result-text").innerHTML = `<span class="text-error">× 不正解...</span> <span class="correct-hint">(正解: ${correctStrings.join(', ')})</span>`;
+                if (rule === 'stock') {
+                    currentStock--;
+                }
+            }
+
+            // 手元の表示更新
+            if (rule === 'stock') {
+                document.getElementById("status-display").innerText = currentStock > 0 ? "★".repeat(currentStock) : "✕ 脱落";
+            } else {
+                document.getElementById("status-display").innerText = `${correctCount} 問`;
+            }
+
+            document.getElementById("ans-btn").disabled = true;
+            document.getElementById("next-btn").disabled = false;
+
+            // Firestoreへのリアルタイム進捗情報のアップデート（ホストへの同期）
+            try {
+                await updateDoc(doc(db, "rooms", roomId, "players", playerId), {
+                    correct: correctCount,
+                    miss: missCount,
+                    stock: currentStock,
+                    elapsedTime: totalElapsedTime,
+                    currentQIdx: qIdx + 1,
+                    isFinished: (qIdx + 1 >= 50 || (rule === 'stock' && currentStock <= 0))
+                });
+            } catch (e) {
+                console.error("データ同期エラー: ", e);
+            }
+
+            // ストック制で脱落した場合の即時終了判定
+            if (rule === 'stock' && currentStock <= 0) {
+                isAggregating = true;
+                setTimeout(() => { endGamePlay(); }, 2000);
+            }
+        };
+
+        window.nextQuestion = function() {
+            if (isAggregating) return;
+            qIdx++;
+            if (qIdx >= 50) { // 上限を50問にスケールアップ
+                endGamePlay();
+            } else {
+                loadQuestion();
+            }
+        };
+
+        function endGamePlay() {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById('screen-finish').classList.add('active');
+            
+            // 手元用の簡易リザルト表示
+            document.getElementById("res-score").innerText = rule === 'stock' ? `${currentStock} / ${initialStock}` : `${correctCount} 問`;
+            document.getElementById("res-miss").innerText = `${missCount} 回`;
+            document.getElementById("res-time").innerText = `${(totalElapsedTime / 1000).toFixed(2)} 秒`;
+        }
+
+        // ソフトキーボードおよび入力制御群
+        window.keyIn = function(k) {
+            if (isAggregating) return;
+            const input = document.getElementById(`in-${activeInputIdx}`);
+            if (!input || document.getElementById('ans-btn').disabled) return;
+
+            if (k === 'back') input.value = input.value.slice(0, -1);
+            else if (k === '+' || k === '-') { if (input.value === '') input.value = k; }
+            else input.value += k;
+        };
+
+        document.addEventListener('keydown', (e) => {
+            if (isAggregating) return;
+            const input = document.getElementById(`in-${activeInputIdx}`);
+            const isAnsDisabled = document.getElementById('ans-btn').disabled;
+
+            if (!isAnsDisabled && input) {
+                if (e.key >= '0' && e.key <= '9') input.value += e.key;
+                else if (e.key === '-' || e.key === '+') { if (input.value === '') input.value = e.key; }
+                else if (e.key === 'Backspace') input.value = input.value.slice(0, -1);
+                else if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const inputs = document.querySelectorAll('.fill-input');
+                    if(inputs.length > 1) {
+                        setActiveInput((activeInputIdx + 1) % inputs.length);
+                    }
+                }
+            }
+
+            if (e.key === 'Enter') {
+                if (!document.getElementById('ans-btn').disabled) checkAnswer();
+                else if (!document.getElementById('next-btn').disabled) nextQuestion();
+            }
+        });
+
+        window.quitEarly = function() {
+            if(confirm("本当に対戦を終了してロビーに戻りますか？データはリセットされます。")) {
+                location.reload();
+            }
+        };
+    </script>
+
+    <style>
+        :root {
+            --bg-color: #f8f9fa;
+            --card-bg: #ffffff;
+            --text-main: #212529;
+            --border: #dee2e6;
+            --accent: #495057;
+            --p1-color: #0d6efd;
+            --success: #198754;
+            --error: #dc3545;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .app-container {
+            width: 100%;
+            max-width: 720px; /* カードビューの拡張横幅を維持 */
+            background: var(--card-bg);
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+            border: 1px solid var(--border);
+            box-sizing: border-box;
+            position: relative;
+        }
+
+        .screen { display: none; }
+        .screen.active { display: block; }
+
+        h2 { text-align: center; color: var(--accent); margin-bottom: 25px; font-weight: 700; }
+        .input-group { margin: 20px 0; text-align: left; }
+        .input-group label { display: block; font-weight: 600; margin-bottom: 8px; color: var(--accent); }
+        .text-input { width: 100%; padding: 14px; font-size: 1.1rem; border: 2px solid var(--border); border-radius: 8px; box-sizing: border-box; outline: none; }
+        .text-input:focus { border-color: var(--p1-color); }
+
+        .btn-main { width: 100%; padding: 14px; font-size: 1.1rem; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; transition: all 0.2s; box-sizing: border-box; }
+        .btn-ans { background: var(--accent); color: #fff; }
+        .btn-ans:hover:not(:disabled) { background-color: #343a40; }
+        .btn-ans:disabled { background: var(--border); color: #adb5bd; cursor: not-allowed; }
+        .btn-next { background: #e9ecef; color: var(--text-main); border: 1px solid var(--border); }
+        .btn-next:hover:not(:disabled) { background: #dee2e6; }
+        .btn-next:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* クイズ画面スタイル */
+        .game-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; color: #6c757d; font-size: 0.95rem; font-weight: 600; }
+        .status-badge-box { background: #f1f3f5; padding: 6px 14px; border-radius: 6px; color: var(--text-main); font-weight: 700; }
+        .step-title { font-size: 0.9rem; font-weight: 600; color: #495057; margin-bottom: 12px; border-left: 3px solid #6c757d; padding-left: 8px; text-align: left; }
+        
+        .question-box { font-size: 1.4rem; padding: 25px; background: #f1f3f5; border-radius: 10px; text-align: center; margin-bottom: 15px; min-height: 50px; display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 6px; }
+        .fill-input { width: 65px; height: 40px; font-size: 1.25rem; text-align: center; border: 2px solid var(--border); border-radius: 6px; outline: none; background: #fff; box-sizing: border-box; vertical-align: middle; }
+        .fill-input.active-focus { border-color: #0d6efd; background: #e7f5ff; box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.15); }
+
+        #result-text { text-align: center; font-weight: bold; font-size: 1.15rem; min-height: 28px; margin-bottom: 15px; }
+        .text-success { color: var(--success); }
+        .text-error { color: var(--error); }
+        .correct-hint { display: block; font-size: 0.85rem; color: #6c757d; font-weight: normal; margin-top: 4px; }
+
+        /* ソフトキーボード */
+        .keyboard { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 20px; background: #f1f3f5; padding: 10px; border-radius: 10px; transition: opacity 0.2s; }
+        .key { background: white; border: 1px solid var(--border); padding: 12px; font-size: 1.2rem; font-weight: bold; border-radius: 6px; cursor: pointer; text-align: center; user-select: none; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+        .key:active { background: #e9ecef; }
+        .key-action { background: #e2e6ea; font-size: 1rem; display: flex; justify-content: center; align-items: center; }
+
+        /* ローディングアニメーション */
+        .loader { border: 4px solid #f3f3f3; border-top: 4px solid var(--p1-color); border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .quit-btn { background: none; border: 1px solid #ced4da; color: #6c757d; font-size: 0.75rem; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+
+        /* フィニッシュ画面スタッツ */
+        .stat-list { background: #f8f9fa; border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin: 20px 0; text-align: left; }
+        .stat-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #e9ecef; font-size: 1.1rem; }
+        .stat-row:last-child { border-bottom: none; }
+        .stat-row span:first-child { font-weight: 600; color: var(--accent); }
+        .stat-row span:last-child { font-weight: 700; color: var(--text-main); }
+    </style>
+</head>
+<body>
+
+<div class="app-container">
+    <!-- SCREEN 1: ログイン・入室画面 -->
+    <div id="screen-login" class="screen active">
+        <h2>平方完成マルチバトル</h2>
+        <div class="input-group">
+            <label for="room-id-input">ルームID（4桁の数字）</label>
+            <input type="number" id="room-id-input" class="text-input" placeholder="先生の画面の数字を入力" pattern="\d*">
+        </div>
+        <div class="input-group">
+            <label for="nickname-input">あなたのニックネーム</label>
+            <input type="text" id="nickname-input" class="text-input" placeholder="例：たろう、ひろと" maxlength="12">
+        </div>
+        <button id="join-btn" class="btn-main btn-ans" onclick="joinRoom()">対戦部屋に入る</button>
+    </div>
+
+    <!-- SCREEN 2: 開始待機ロビー画面 -->
+    <div id="screen-wait" class="screen" style="text-align: center; padding: 20px 0;">
+        <h2>入室が完了しました！</h2>
+        <p style="color:#6c757d; font-size:1.1rem;">他の仲間が集まり、先生がゲームをスタートするまでしばらくお待ちください...</p>
+        <div class="loader"></div>
+    </div>
+
+    <!-- SCREEN 3: カウントダウン画面 -->
+    <div id="screen-countdown" class="screen" style="text-align: center; padding: 40px 0;">
+        <h2 style="font-size: 2rem; color: var(--p1-color);">まもなくスタート！</h2>
+        <div id="countdown-number" style="font-size: 7rem; font-weight: 800; color: var(--accent); margin: 20px 0;">3</div>
+    </div>
+
+    <!-- SCREEN 4: クイズ解答メイン画面 -->
+    <div id="screen-game" class="screen">
+        <div class="game-header">
+            <div id="game-info">1 / 50問目</div>
+            <div class="status-badge-box">
+                <span id="status-label" style="font-size:0.8rem; color:#6c757d; margin-right:6px;">正解数</span>
+                <span id="status-display">0 問</span>
+            </div>
+            <button class="quit-btn" onclick="quitEarly()">退出</button>
+        </div>
+
+        <div class="step-title" id="step-desc">Loading...</div>
+        <div class="question-box" id="question-area"></div>
+        
+        <div id="result-text"></div>
+
+        <div style="display: flex; gap: 12px; margin-bottom: 15px;">
+            <button id="ans-btn" class="btn-main btn-ans" onclick="checkAnswer()">解答する</button>
+            <button id="next-btn" class="btn-main btn-next" onclick="nextQuestion()" disabled>次に進む</button>
+        </div>
+
+        <div class="keyboard" id="soft-keyboard">
+            <div class="key" onclick="keyIn('1')">1</div><div class="key" onclick="keyIn('2')">2</div><div class="key" onclick="keyIn('3')">3</div><div class="key key-action" onclick="keyIn('-')">－</div>
+            <div class="key" onclick="keyIn('4')">4</div><div class="key" onclick="keyIn('5')">5</div><div class="key" onclick="keyIn('6')">6</div><div class="key key-action" onclick="keyIn('+')">＋</div>
+            <div class="key" onclick="keyIn('7')">7</div><div class="key" onclick="keyIn('8')">8</div><div class="key" onclick="keyIn('9')">9</div><div class="key key-action" onclick="keyIn('back')">消去</div>
+            <div class="key" style="grid-column: span 4; background: #fff;" onclick="keyIn('0')">0</div>
+        </div>
+    </div>
+
+    <!-- SCREEN 5: 個人解答終了画面 -->
+    <div id="screen-finish" class="screen" style="text-align: center;">
+        <h2 style="color:var(--success);">FINISH!!</h2>
+        <p style="color:#6c757d;">全ての解答を送信しました！<br>順位は前方のプロジェクター大画面を確認してください。</p>
+        
+        <div class="stat-list">
+            <div class="stat-row"><span>あなたの成績</span><span id="res-score">-</span></div>
+            <div class="stat-row"><span>ミスの回数</span><span id="res-miss">-</span></div>
+            <div class="stat-row"><span>合計解答時間</span><span id="res-time">-</span></div>
+        </div>
+        
+        <p style="font-size:0.85rem; color:#adb5bd; margin-top:25px;">※次の対戦を行う場合は、先生が部屋をリセットした後に「退出」を押してメイン画面に戻ってください。</p>
+        <button class="btn-main btn-next" onclick="location.reload()">ロビーに戻る</button>
+    </div>
+</div>
+
+</body>
+</html>
