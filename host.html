@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
@@ -10,26 +10,31 @@
         import { getFirestore, doc, setDoc, updateDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
         import { getDatabase, ref, get } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
-        const firebaseConfig = {
-            apiKey: "AIzaSyCIWQzF_drCJqu0p2pPVYfdA_EVIJSDH2k",
-            authDomain: "yamatest-e394f.firebaseapp.com",
-            projectId: "yamatest-e394f",
-            databaseURL: "https://yamatest-e394f-default-rtdb.firebaseio.com",
-            storageBucket: "yamatest-e394f.firebasestorage.app",
-            messagingSenderId: "725899974814",
-            appId: "1:725899974814:web:7bb050e79938a7f140838f"
-        };
-
-        const app = initializeApp(firebaseConfig);
-        const db = getFirestore(app);
-        const rtdb = getDatabase(app);
-
+        // グローバル変数の宣言
+        let db, rtdb;
         let currentRoomId = null;
         let unsubscribePlayers = null;
         let playersData = {};
         let hostTimerInterval = null;
 
+        // 【改善】外部のJSONファイルからFirebase設定を動的に読み込む
+        try {
+            const response = await fetch('./firebase-config.json');
+            if (!response.ok) throw new Error("JSONファイルの読み込みに失敗しました");
+            const firebaseConfig = await response.json();
+            
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            rtdb = getDatabase(app);
+            
+            console.log("Firebase initialized dynamically via JSON.");
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            alert("データベース設定の読み込みに失敗しました。\nローカルサーバー（http://localhost...）で実行しているか確認してください。");
+        }
+
         window.onload = async () => {
+            if (!rtdb) return; // DB初期化失敗時はスキップ
             const classSelect = document.getElementById('mals-class-select');
             try {
                 const snap = await get(ref(rtdb, 'mals_v6_system/classes'));
@@ -107,7 +112,7 @@
 
                 if (selectedQuestions.length === 0) {
                     alert("選択した単元に問題がありません。");
-                    btn.disabled = false; btn.innerText = "対戦ルームを作る"; return;
+                    btn.disabled = false; btn.innerText = "対戦部屋を作る"; return;
                 }
 
                 selectedQuestions.sort(() => Math.random() - 0.5);
@@ -129,8 +134,8 @@
                 listenPlayers();
             } catch (e) {
                 console.error(e);
-                alert("ルームの作成に失敗しました。");
-                btn.disabled = false; btn.innerText = "対戦ルームを作る";
+                alert("部屋の作成に失敗しました。");
+                btn.disabled = false; btn.innerText = "対戦部屋を作る";
             }
         };
 
@@ -212,7 +217,6 @@
                     timerEl.innerText = "00:00";
                     timerEl.style.color = "var(--error)";
                     labelEl.innerText = "ゲーム終了！";
-                    // 終了フラグを書き込み、全生徒を強制終了させる
                     updateDoc(doc(db, "rooms", currentRoomId), { status: "finished" });
                 } else {
                     timerEl.innerText = `${String(Math.floor(left / 60)).padStart(2,'0')}:${String(left % 60).padStart(2,'0')}`;
@@ -232,8 +236,7 @@
                 <div class="leaderboard-row ${p.isFinished ? 'finished' : ''}">
                     <div style="display:flex; align-items:center; gap:15px;">
                         <span style="font-weight:bold; font-size:1.2rem; color:#6c757d;">${index + 1}</span>
-                        <span style="font-weight:bold; font-size:1.1rem;">${p.nickname}</span>
-                        ${p.isFinished ? '<span style="font-size:0.8rem; background:#0d6efd; color:#fff; padding:2px 6px; border-radius:4px;">終了</span>' : ''}
+                        <span style="font-weight:bold; font-size:1.1rem;">${p.nickname}</span>${p.isFinished ? '<span style="font-size:0.8rem; background:#0d6efd; color:#fff; padding:2px 6px; border-radius:4px;">終了</span>' : ''}
                     </div>
                     <div style="text-align:right;">
                         <div style="font-weight:bold; color:#198754;">正解: ${p.correct} 問</div>
@@ -262,22 +265,17 @@
         .btn-main { width: 100%; padding: 14px; font-size: 1.1rem; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; transition: all 0.2s; box-sizing: border-box; color: #fff; background: var(--p1-color); }
         .btn-main:hover:not(:disabled) { background: #0b5ed7; }
         .btn-main:disabled { background: var(--border); cursor: not-allowed; }
-        
         .room-id-display { font-size: 5rem; font-weight: 800; text-align: center; letter-spacing: 5px; color: var(--text-main); margin: 10px 0; }
         .player-chip { display: inline-block; padding: 8px 16px; background: #e7f5ff; border: 1px solid #74c0fc; color: #1864ab; border-radius: 20px; font-weight: 600; margin: 5px; }
-        
         .leaderboard-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; border-bottom: 1px solid var(--border); }
         .leaderboard-row.finished { background-color: #f1f3f5; }
-        
-        /* タイマーコンテナ用スタイル */
         .host-timer-container { text-align: center; margin: 10px 0 25px 0; background: #f8f9fa; padding: 25px; border-radius: 12px; border: 2px solid var(--border); }
     </style>
 </head>
 <body>
 <div class="app-container">
-    <!-- 画面1: ルーム作成 -->
     <div id="screen-setup" class="screen active">
-        <h2>ルームの作成</h2>
+        <h2>対戦部屋の作成（ホスト）</h2>
         <div class="input-group">
             <label>MALS クラス選択</label>
             <select id="mals-class-select" onchange="loadCategories()">
@@ -285,7 +283,7 @@
             </select>
         </div>
         <div class="input-group">
-            <label>出題する単元</label>
+            <label>出題する単元（小単元）</label>
             <select id="mals-category-select">
                 <option value="">先にクラスを選択してください</option>
             </select>
@@ -302,17 +300,16 @@
         <div class="input-group">
             <label>ゲームルール</label>
             <select id="game-rule">
-                <option value="time">タイム制</option>
-                <option value="stock">ストック制</option>
+                <option value="time">タイムアタック（制限時間内で正解数を競う）</option>
+                <option value="stock">サバイバル（3回ミスで脱落・残機制）</option>
             </select>
         </div>
-        <button id="create-btn" class="btn-main" style="margin-top:20px;" onclick="createRoom()">この設定でルームを作る</button>
+        <button id="create-btn" class="btn-main" style="margin-top:20px;" onclick="createRoom()">この設定で部屋を作る</button>
     </div>
 
-    <!-- 画面2: ロビー待機 -->
     <div id="screen-lobby" class="screen">
         <h2>参加者待ち</h2>
-        <p style="text-align: center; color: #6c757d; margin-bottom:0;">このルームIDを入力してください</p>
+        <p style="text-align: center; color: #6c757d; margin-bottom:0;">生徒にこのルームIDを入力させてください</p>
         <div class="room-id-display" id="display-room-id">----</div>
         <p style="text-align: center; font-weight:bold; color:#0d6efd;" id="q-count-label">出題数: -問</p>
         
@@ -321,28 +318,23 @@
             <div id="player-list"></div>
         </div>
         
-        <button class="btn-main" style="background:#198754;" onclick="startGame()">全員揃ったら対戦開始！</button>
+        <button class="btn-main" style="background:#198754;" onclick="startGame()">全員揃ったらゲーム開始！</button>
         <button class="btn-main" style="background:#6c757d; margin-top:10px;" onclick="resetHost()">やめる</button>
     </div>
 
-    <!-- カウントダウン（ホスト画面） -->
     <div id="screen-countdown" class="screen" style="text-align: center; padding: 40px 0;">
         <h2 style="font-size: 2.5rem; color: var(--p1-color);">まもなくスタート！</h2>
         <div id="countdown-number" style="font-size: 8rem; font-weight: 800; color: var(--accent); margin: 20px 0;">3</div>
     </div>
 
-    <!-- 画面3: プレイ中モニター -->
     <div id="screen-monitor" class="screen">
-        
         <div class="host-timer-container">
             <div id="host-timer-label" style="font-size: 1.4rem; color: var(--accent); font-weight: bold; margin-bottom: 5px;">残り時間</div>
             <div id="host-timer" style="font-size: 7rem; font-weight: 800; color: var(--text-main); font-variant-numeric: tabular-nums; line-height: 1;">--:--</div>
         </div>
 
-        <h2>リアルタイム順位</h2>
-        <div style="background: #fff; border: 1px solid var(--border); border-radius: 8px; max-height: 400px; overflow-y: auto;" id="leaderboard">
-            <!-- リアルタイム順位がここに描画される -->
-        </div>
+        <h2>ライブランキング</h2>
+        <div style="background: #fff; border: 1px solid var(--border); border-radius: 8px; max-height: 400px; overflow-y: auto;" id="leaderboard"></div>
         <button class="btn-main" style="background:#6c757d; margin-top:20px;" onclick="resetHost()">ゲームを終了して戻る</button>
     </div>
 </div>

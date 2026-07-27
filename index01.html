@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
@@ -13,18 +13,8 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
-        const firebaseConfig = {
-            apiKey: "AIzaSyCIWQzF_drCJqu0p2pPVYfdA_EVIJSDH2k",
-            authDomain: "yamatest-e394f.firebaseapp.com",
-            projectId: "yamatest-e394f",
-            storageBucket: "yamatest-e394f.firebasestorage.app",
-            messagingSenderId: "725899974814",
-            appId: "1:725899974814:web:7bb050e79938a7f140838f"
-        };
-
-        const app = initializeApp(firebaseConfig);
-        const db = getFirestore(app);
-
+        // グローバル変数の宣言
+        let db;
         let roomId = null;
         let playerId = null;
         let nickname = "";
@@ -44,6 +34,21 @@
         let roomTimeLimit = 0;
         let studentTimerInterval = null;
 
+        // 【改善】外部のJSONファイルからFirebase設定を動的に読み込む
+        try {
+            const response = await fetch('./firebase-config.json');
+            if (!response.ok) throw new Error("JSONファイルの読み込みに失敗しました");
+            const firebaseConfig = await response.json();
+            
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            
+            console.log("Firebase initialized dynamically via JSON.");
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            alert("データベース設定の読み込みに失敗しました。\nローカルサーバー（http://localhost...）で実行しているか確認してください。");
+        }
+
         // MALS互換ユーティリティ
         function escapeHtmlPreservingText(text) { return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
         function parseFlexibleNumber(str) {
@@ -58,6 +63,7 @@
         }
 
         window.joinRoom = async function() {
+            if (!db) { alert("データベースに接続されていません。"); return; }
             const roomInput = document.getElementById("room-id-input").value.trim();
             const nameInput = document.getElementById("nickname-input").value.trim();
             const btn = document.getElementById("join-btn");
@@ -91,7 +97,7 @@
 
             } catch (e) {
                 console.error(e); alert("接続に失敗しました。");
-                btn.disabled = false; btn.innerText = "ルームに入る";
+                btn.disabled = false; btn.innerText = "対戦部屋に入る";
             }
         };
 
@@ -100,12 +106,10 @@
                 if (!docSnap.exists()) return;
                 const data = docSnap.data();
                 
-                // ホストが開始ボタンを押した瞬間
                 if (data.status === "playing" && !document.getElementById('screen-game').classList.contains('active') && !document.getElementById('screen-countdown').classList.contains('active')) {
                     roomTimeLimit = data.timeLimit || 0;
                     startCountdown();
                 } 
-                // ホストのタイマーが0になり、強制終了命令が来た瞬間
                 else if (data.status === "finished") {
                     if (!isAggregating && !document.getElementById('screen-finish').classList.contains('active')) {
                         isAggregating = true;
@@ -135,7 +139,7 @@
 
         function initGamePlay() {
             qIdx = 0; correctCount = 0; missCount = 0; totalElapsedTime = 0; isAggregating = false;
-            document.getElementById("status-label").innerText = rule === 'stock' ? "ストック" : "正解";
+            document.getElementById("status-label").innerText = rule === 'stock' ? "残機" : "正解";
             document.getElementById("status-display").innerText = rule === 'stock' ? "★".repeat(initialStock) : "0 問";
             startStudentTimer(roomTimeLimit);
             loadQuestion();
@@ -143,7 +147,7 @@
         
         function startStudentTimer(timeLimit) {
             const timerEl = document.getElementById('student-timer-display');
-            if (timeLimit === 0) { // 無制限
+            if (timeLimit === 0) { 
                 const startTime = Date.now();
                 studentTimerInterval = setInterval(() => {
                     const elapsed = Math.floor((Date.now() - startTime) / 1000);
@@ -172,7 +176,7 @@
             const area = document.getElementById("question-area");
             area.innerHTML = '';
 
-            document.getElementById("game-info").innerText = `${qIdx + 1} / ${questions.length}問`;
+            document.getElementById("game-info").innerText = `${qIdx + 1} /${questions.length}問`;
 
             const questionDiv = document.createElement("div");
             questionDiv.innerHTML = escapeHtmlPreservingText(q.question);
@@ -286,20 +290,19 @@
         function endGamePlay() {
             if (studentTimerInterval) clearInterval(studentTimerInterval);
             
-            // プレイ中にFirestoreに最後の状態を念のため同期
             updateDoc(doc(db, "rooms", roomId, "players", playerId), {
                 isFinished: true, correct: correctCount, miss: missCount, elapsedTime: totalElapsedTime
             }).catch(e => console.error(e));
 
             document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
             document.getElementById('screen-finish').classList.add('active');
-            document.getElementById("res-score").innerText = rule === 'stock' ? `${currentStock} / ${initialStock}` : `${correctCount} 問`;
+            document.getElementById("res-score").innerText = rule === 'stock' ? `${currentStock} /${initialStock}` : `${correctCount} 問`;
             document.getElementById("res-miss").innerText = `${missCount} 回`;
             document.getElementById("res-time").innerText = `${(totalElapsedTime / 1000).toFixed(2)} 秒`;
         }
 
         window.quitEarly = function() {
-            if(confirm("対戦を終了してロビーに戻りますか？")) location.reload();
+            if(confirm("本当に対戦を終了してロビーに戻りますか？")) location.reload();
         };
     </script>
     <style>
@@ -320,7 +323,6 @@
         .btn-next:hover:not(:disabled) { background: #dee2e6; }
         .btn-next:disabled { opacity: 0.4; cursor: not-allowed; }
         
-        /* ゲーム画面ヘッダー周り（タイマー追加用） */
         .game-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; color: #6c757d; font-size: 0.95rem; font-weight: 600; }
         .status-badge-box { background: #f1f3f5; padding: 6px 12px; border-radius: 6px; color: var(--text-main); font-weight: 700; }
         .timer-badge { background: #fff3cd; color: #856404; padding: 4px 12px; border-radius: 20px; display: flex; align-items: center; gap: 6px; border: 1px solid #ffeeba; }
@@ -339,16 +341,16 @@
 <body>
 <div class="app-container">
     <div id="screen-login" class="screen active">
-        <h2>ロビー</h2>
+        <h2>MALS バトル</h2>
         <div class="input-group">
-            <label>ルームID</label>
-            <input type="number" id="room-id-input" class="text-input" placeholder="４桁の数字を入力">
+            <label>ルームID（4桁の数字）</label>
+            <input type="number" id="room-id-input" class="text-input" placeholder="先生の画面の数字を入力">
         </div>
         <div class="input-group">
             <label>あなたのニックネーム</label>
-            <input type="text" id="nickname-input" class="text-input" placeholder="ばなな" maxlength="12">
+            <input type="text" id="nickname-input" class="text-input" placeholder="例：たろう、ひろと" maxlength="12">
         </div>
-        <button id="join-btn" class="btn-main btn-ans" onclick="joinRoom()">ルームに入る</button>
+        <button id="join-btn" class="btn-main btn-ans" onclick="joinRoom()">対戦部屋に入る</button>
     </div>
 
     <div id="screen-wait" class="screen" style="text-align: center; padding: 20px 0;">
