@@ -36,7 +36,7 @@
 
         // 【改善】外部のJSONファイルからFirebase設定を動的に読み込む
         try {
-            const response = await fetch('./firebase-config.json');
+            const response = await fetch('./mals-firebase-config.json');
             if (!response.ok) throw new Error("JSONファイルの読み込みに失敗しました");
             const firebaseConfig = await response.json();
             
